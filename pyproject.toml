@@ -1,0 +1,13 @@
+[project]
+name = "traceneedle"
+version = "0.1.0"
+description = "Группировка ошибок и обнаружение новых инцидентов"
+requires-python = ">=3.11"
+dependencies = ["fastapi>=0.115,<1", "uvicorn>=0.30,<1", "psycopg[binary]>=3.2,<4", "pika>=1.3,<2", "drain3>=0.9.11,<1", "scikit-learn>=1.5,<2"]
+[dependency-groups]
+dev = ["pytest>=8,<10", "httpx>=0.27,<1", "ruff>=0.9,<1"]
+[tool.ruff]
+line-length = 100
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

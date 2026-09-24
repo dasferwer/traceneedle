@@ -1,0 +1,28 @@
+name: Проверки
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      DATABASE_URL: postgresql://demo:demo@localhost:54836/traceneedle
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.17"
+          python-version: "3.11"
+      - run: uv sync --frozen
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: docker compose up --build -d
+      - run: |
+          for attempt in $(seq 1 60); do
+            curl -fsS -H 'X-API-Key: local-demo-key' http://localhost:8096/health && break
+            sleep 2
+          done
+          uv run pytest -q
+          uv run python -m scripts.evaluate
+      - if: always()
+        run: docker compose down

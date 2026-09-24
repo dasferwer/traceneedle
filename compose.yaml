@@ -1,0 +1,38 @@
+services:
+  database:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_USER: demo
+      POSTGRES_PASSWORD: demo
+      POSTGRES_DB: traceneedle
+    ports: ["127.0.0.1:54836:5432"]
+    volumes: ["database:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U demo -d traceneedle"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+  rabbitmq:
+    image: rabbitmq:4-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: demo
+      RABBITMQ_DEFAULT_PASS: demo
+    ports: ["127.0.0.1:5636:5672"]
+  api:
+    build: .
+    environment: &environment
+      DATABASE_URL: postgresql://demo:demo@database/traceneedle
+      API_KEY: local-demo-key
+      AMQP_URL: amqp://demo:demo@rabbitmq:5672/%2F
+    ports: ["127.0.0.1:8096:8000"]
+    depends_on:
+      database: {condition: service_healthy}
+  worker:
+    build: .
+    command: ["python", "-m", "traceneedle.worker"]
+    environment: *environment
+    depends_on:
+      database: {condition: service_healthy}
+      rabbitmq: {condition: service_started}
+volumes:
+  database:
