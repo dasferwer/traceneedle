@@ -176,3 +176,107 @@ def health():
     with connect() as conn:
         conn.execute("SELECT 1")
     return {"status": "ok"}
+
+
+class Traffic(BaseModel):
+    service: str = Field(min_length=1, max_length=80)
+    version: str = Field(min_length=1, max_length=80)
+    minute: datetime
+    requests: int = Field(ge=0, le=1000000000)
+    expected_revision: int = Field(default=0, ge=0)
+
+    @field_validator("minute")
+    @classmethod
+    def minute_boundary(cls, value):
+        if value.tzinfo is None or value.second or value.microsecond:
+            raise ValueError("Нужна граница минуты с часовым поясом")
+        return value
+
+
+@app.put("/traffic")
+def traffic(body: Traffic):
+    with connect() as conn:
+        conn.execute("SELECT pg_advisory_xact_lock(360028)")
+        previous = conn.execute(
+            "SELECT * FROM traffic WHERE service=%s AND version=%s AND minute=%s",
+            (body.service, body.version, body.minute),
+        ).fetchone()
+        revision = previous["revision"] if previous else 0
+        if revision != body.expected_revision:
+            raise HTTPException(409, "Счётчик трафика уже изменён; прочитайте актуальную ревизию")
+        conn.execute(
+            "INSERT INTO traffic VALUES (%s,%s,%s,%s,%s) ON CONFLICT(service,version,minute) DO UPDATE SET requests=EXCLUDED.requests,revision=EXCLUDED.revision",
+            (body.service, body.version, body.minute, body.requests, revision + 1),
+        )
+        conn.execute("UPDATE comparisons SET dirty=true WHERE service=%s", (body.service,))
+        return {"revision": revision + 1}
+
+
+@app.get("/traffic")
+def traffic_state(service: str, version: str, minute: datetime):
+    with connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM traffic WHERE service=%s AND version=%s AND minute=%s",
+            (service, version, minute),
+        ).fetchone()
+    if row is None:
+        raise HTTPException(404, "Счётчик не найден")
+    return row
+
+
+class Comparison(BaseModel):
+    id: uuid.UUID
+    service: str = Field(min_length=1, max_length=80)
+    before_version: str = Field(min_length=1, max_length=80)
+    after_version: str = Field(min_length=1, max_length=80)
+    before_start: datetime
+    after_start: datetime
+    minutes: int = Field(default=5, ge=1, le=60)
+
+    @field_validator("before_start", "after_start")
+    @classmethod
+    def boundaries(cls, value):
+        return Traffic.minute_boundary(value)
+
+
+@app.post("/comparisons", status_code=202)
+def compare_deployment(body: Comparison):
+    with connect() as conn:
+        conn.execute("SELECT pg_advisory_xact_lock(360028)")
+        old = conn.execute("SELECT * FROM comparisons WHERE id=%s", (body.id,)).fetchone()
+        if old:
+            if any(old[k] != v for k, v in body.model_dump().items()):
+                raise HTTPException(409, "Идентификатор сравнения уже используется")
+            return {"id": body.id}
+        if conn.execute("SELECT count(*) AS n FROM comparisons").fetchone()["n"] >= 100:
+            raise HTTPException(409, "Лимит стенда: 100 сравнений")
+        conn.execute(
+            "INSERT INTO comparisons(id,service,before_version,after_version,before_start,after_start,minutes) VALUES (%s,%s,%s,%s,%s,%s,%s)",
+            (
+                body.id,
+                body.service,
+                body.before_version,
+                body.after_version,
+                body.before_start,
+                body.after_start,
+                body.minutes,
+            ),
+        )
+    return {"id": body.id}
+
+
+@app.get("/comparisons/{identity}")
+def comparison(identity: uuid.UUID):
+    with connect() as conn:
+        conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+        row = conn.execute("SELECT * FROM comparisons WHERE id=%s", (identity,)).fetchone()
+        if row is None:
+            raise HTTPException(404, "Сравнение не найдено")
+        row["regressions"] = conn.execute(
+            "SELECT * FROM regressions WHERE comparison_id=%s ORDER BY group_id", (identity,)
+        ).fetchall()
+        row["history"] = conn.execute(
+            "SELECT * FROM regression_history WHERE comparison_id=%s ORDER BY group_id,revision",
+            (identity,),
+        ).fetchall()
+        return row

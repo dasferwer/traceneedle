@@ -6,6 +6,7 @@ import pika
 
 from traceneedle.db import connect, init
 from traceneedle.mining import embedding, miner, normalized
+from traceneedle.regression import tick as regression_tick
 
 logger = logging.getLogger(__name__)
 
@@ -17,7 +18,7 @@ def tick():
             "SELECT * FROM events WHERE group_id IS NULL ORDER BY received_at,id LIMIT 100 FOR UPDATE"
         ).fetchall()
         if not events:
-            return 0
+            return regression_tick(conn)
         model = miner(conn)
         for event in events:
             result = model.add_log_message(event["service"] + " " + normalized(event["message"]))
@@ -56,6 +57,11 @@ def tick():
                         """INSERT INTO incidents VALUES (%s,%s,clock_timestamp(),%s) ON CONFLICT DO NOTHING""",
                         (group, event["version"], recent["first"]),
                     )
+        conn.execute(
+            "UPDATE comparisons SET dirty=true WHERE service=ANY(%s)",
+            (list({e["service"] for e in events}),),
+        )
+        regression_tick(conn)
         model.save_state("batch")
         return len(events)
 
