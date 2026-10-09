@@ -1,0 +1,24 @@
+{
+  "source": "https://github.com/logpai/loghub/tree/dd61d0952749ee7963bde24220d1be5ede023033/HDFS",
+  "sha256": "729df59774e3dde934044028546d2a55d5e3d4370b9d12fcebbe4c087b2bf7b4",
+  "events": 1998,
+  "excluded_by_api_length": [
+    "1579",
+    "1581"
+  ],
+  "independent_templates": 14,
+  "predicted_groups": 1369,
+  "adjusted_rand_index": 0.060882524547701135,
+  "pair_precision": 1.0,
+  "pair_recall": 0.03582977521034786,
+  "false_merged_pairs": 0,
+  "missed_same_template_pairs": 245686,
+  "elapsed_seconds": 25.33715070800099,
+  "evaluator_maxrss_native_units": 125845504,
+  "platform": "macOS-27.2-arm64-arm-64bit",
+  "python": "3.12.13",
+  "order": "source LineId; no shuffle",
+  "concurrency": 1,
+  "timestamps": "shifted to recent synthetic timestamps; Content and EventId unchanged",
+  "scope": "template grouping, not incident correctness or anomaly detection"
+}
