@@ -1,0 +1,25 @@
+{
+  "schema": "runtime_p236",
+  "seed": 360,
+  "workload": 10000,
+  "batch_size": 1000,
+  "concurrency": 1,
+  "deleted_events": 10000,
+  "cleanup_calls_including_empty": 11,
+  "elapsed_seconds": 2.204355958994711,
+  "max_batch_seconds": 0.26972670800751075,
+  "pinned_history_revisions": [
+    1,
+    2,
+    3
+  ],
+  "statuses": [
+    "active",
+    "retracted",
+    "active"
+  ],
+  "unsupported_after_archive_http_status": 422,
+  "driver_maxrss_native_units": 53706752,
+  "platform": "macOS-27.2-arm64-arm-64bit",
+  "note": "synthetic aged workload; local result, not SLA"
+}

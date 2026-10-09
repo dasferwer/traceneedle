@@ -35,7 +35,13 @@ def evaluate(conn, comparison):
             and before_coverage == comparison["minutes"]
             and after_coverage == comparison["minutes"]
         )
-        active = bool(enough and new >= 5 and after_rate >= max(0.01, 3 * before_rate))
+        active = bool(
+            enough
+            and new >= 5
+            and before_rate is not None
+            and after_rate is not None
+            and after_rate >= max(0.01, 3 * before_rate)
+        )
         state = "active" if active else ("retracted" if group in existing else "quiet")
         evidence = {
             "before_errors": old,
@@ -79,7 +85,7 @@ def evaluate(conn, comparison):
 def tick(conn):
     # Тот же порядок блокировок, что у обработки логов; late data не теряет dirty-флаг.
     queued = conn.execute(
-        "SELECT * FROM comparisons WHERE dirty ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 20"
+        "SELECT * FROM comparisons WHERE dirty AND archived_at IS NULL ORDER BY id FOR UPDATE SKIP LOCKED LIMIT 20"
     ).fetchall()
     for comparison in queued:
         evaluate(conn, comparison)

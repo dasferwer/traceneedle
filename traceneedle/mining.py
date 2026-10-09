@@ -1,8 +1,10 @@
 import re
+from typing import cast
 
 from drain3 import TemplateMiner
 from drain3.persistence_handler import PersistenceHandler
 from drain3.template_miner_config import TemplateMinerConfig
+from scipy.sparse import csr_matrix
 from sklearn.feature_extraction.text import HashingVectorizer
 
 VECTORIZER = HashingVectorizer(
@@ -17,14 +19,15 @@ def normalized(message):
 
 
 def embedding(template):
-    return str(VECTORIZER.transform([template]).toarray()[0].tolist())
+    return str(cast(csr_matrix, VECTORIZER.transform([template])).toarray()[0].tolist())
 
 
 class State(PersistenceHandler):
     def __init__(self, conn):
         self.conn = conn
 
-    def load_state(self):
+    # Drain3 выводит None из пустого метода базы; фактический контракт — bytes | None.
+    def load_state(self):  # pyright: ignore[reportIncompatibleMethodOverride]
         row = self.conn.execute("SELECT state FROM miner_state WHERE id=1").fetchone()
         return bytes(row["state"]) if row else None
 

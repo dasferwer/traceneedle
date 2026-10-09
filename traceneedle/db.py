@@ -1,14 +1,20 @@
 import os
+from typing import Any
 
 import psycopg
 from psycopg.rows import dict_row
 
 
-def connect():
-    return psycopg.connect(os.environ["DATABASE_URL"], row_factory=dict_row)
+def connect() -> psycopg.Connection[dict[str, Any]]:
+    return psycopg.Connection[dict[str, Any]].connect(
+        os.environ["DATABASE_URL"], row_factory=dict_row
+    )
 
 
 def init():
+    from traceneedle.retention import policy
+
+    policy()
     with connect() as conn:
         conn.execute("SELECT pg_advisory_xact_lock(360029)")
         conn.execute("CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public")
@@ -47,4 +53,17 @@ def init():
                 comparison_id uuid NOT NULL,group_id bigint NOT NULL,revision integer NOT NULL,
                 status text NOT NULL,evidence jsonb NOT NULL,created_at timestamptz NOT NULL DEFAULT now(),
                 PRIMARY KEY(comparison_id,group_id,revision));
+            ALTER TABLE comparisons ADD COLUMN IF NOT EXISTS archived_at timestamptz;
+            CREATE TABLE IF NOT EXISTS retention_state (
+                id integer PRIMARY KEY CHECK(id=1), retained_since timestamptz);
+            INSERT INTO retention_state VALUES (1,NULL) ON CONFLICT DO NOTHING;
+            CREATE TABLE IF NOT EXISTS group_versions (
+                group_id bigint REFERENCES groups(id), version text NOT NULL,
+                last_seen timestamptz NOT NULL, first_error timestamptz,
+                PRIMARY KEY(group_id,version));
+            INSERT INTO group_versions SELECT group_id,version,max(happened_at),
+                min(happened_at) FILTER (WHERE level='ERROR') FROM events
+                WHERE group_id IS NOT NULL GROUP BY group_id,version ON CONFLICT DO NOTHING;
+            CREATE INDEX IF NOT EXISTS retention_events ON events(happened_at,id) WHERE group_id IS NOT NULL;
+            CREATE INDEX IF NOT EXISTS retention_traffic ON traffic(minute,service,version);
         """)

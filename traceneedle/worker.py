@@ -3,6 +3,7 @@ import os
 import time
 
 import pika
+from pika.exceptions import AMQPError
 
 from traceneedle.db import connect, init
 from traceneedle.mining import embedding, miner, normalized
@@ -22,7 +23,7 @@ def tick():
         model = miner(conn)
         for event in events:
             result = model.add_log_message(event["service"] + " " + normalized(event["message"]))
-            group = conn.execute(
+            group_row = conn.execute(
                 """INSERT INTO groups(service,cluster_id,template,embedding,first_seen)
                 VALUES (%s,%s,%s,%s::public.vector,%s) ON CONFLICT(service,cluster_id)
                 DO UPDATE SET template=EXCLUDED.template,embedding=EXCLUDED.embedding,
@@ -34,22 +35,35 @@ def tick():
                     embedding(result["template_mined"]),
                     event["happened_at"],
                 ),
-            ).fetchone()["id"]
+            ).fetchone()
+            assert group_row is not None
+            group = group_row["id"]
             conn.execute("UPDATE events SET group_id=%s WHERE id=%s", (group, event["id"]))
             # Окно задано временем события, а обнаружение измеряется временем приёма.
-            anchor = conn.execute(
-                "SELECT max(happened_at) AS value FROM events WHERE group_id=%s AND version=%s",
-                (group, event["version"]),
-            ).fetchone()["value"]
+            anchor_row = conn.execute(
+                """INSERT INTO group_versions(group_id,version,last_seen,first_error)
+                VALUES (%s,%s,%s,%s) ON CONFLICT(group_id,version) DO UPDATE SET
+                last_seen=GREATEST(group_versions.last_seen,EXCLUDED.last_seen),
+                first_error=LEAST(group_versions.first_error,EXCLUDED.first_error) RETURNING last_seen""",
+                (
+                    group,
+                    event["version"],
+                    event["happened_at"],
+                    event["happened_at"] if event["level"] == "ERROR" else None,
+                ),
+            ).fetchone()
+            assert anchor_row is not None
+            anchor = anchor_row["last_seen"]
             recent = conn.execute(
                 """SELECT count(*) AS n,min(happened_at) AS first FROM events
                 WHERE group_id=%s AND version=%s AND level='ERROR'
                 AND happened_at BETWEEN %s-interval '5 minutes' AND %s""",
                 (group, event["version"], anchor, anchor),
             ).fetchone()
+            assert recent is not None
             if event["level"] == "ERROR" and recent["n"] >= 5:
                 known = conn.execute(
-                    "SELECT 1 FROM events WHERE group_id=%s AND version<>%s AND level='ERROR' LIMIT 1",
+                    "SELECT 1 FROM group_versions WHERE group_id=%s AND version<>%s AND first_error IS NOT NULL LIMIT 1",
                     (group, event["version"]),
                 ).fetchone()
                 if not known:
@@ -58,7 +72,7 @@ def tick():
                         (group, event["version"], recent["first"]),
                     )
         conn.execute(
-            "UPDATE comparisons SET dirty=true WHERE service=ANY(%s)",
+            "UPDATE comparisons SET dirty=true WHERE service=ANY(%s) AND archived_at IS NULL",
             (list({e["service"] for e in events}),),
         )
         regression_tick(conn)
@@ -80,7 +94,7 @@ def main():
                     method, _, _ = channel.basic_get(queue="logs", auto_ack=False)
                     if method:
                         channel.basic_ack(method.delivery_tag)
-            except (pika.exceptions.AMQPError, OSError):
+            except (AMQPError, OSError):
                 pass
         except Exception:
             logger.exception("Пакет логов не обработан; повтор после восстановления")

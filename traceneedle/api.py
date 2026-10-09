@@ -7,9 +7,11 @@ from typing import Literal
 
 import pika
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from pika.exceptions import AMQPError
 from pydantic import BaseModel, Field, field_validator
 
 from traceneedle.db import connect, init
+from traceneedle.retention import cleanup, supported_input, supported_since
 
 
 @asynccontextmanager
@@ -55,9 +57,13 @@ def ingest(body: Batch):
     accepted = 0
     with connect() as conn:
         conn.execute("SELECT pg_advisory_xact_lock(360027)")
-        pending = conn.execute(
+        conn.execute("SELECT pg_advisory_xact_lock(360028)")
+        floor = supported_since(conn)
+        pending_row = conn.execute(
             "SELECT count(*) AS n FROM events WHERE group_id IS NULL"
-        ).fetchone()["n"]
+        ).fetchone()
+        assert pending_row is not None
+        pending = pending_row["n"]
         existing = {
             r["id"]
             for r in conn.execute(
@@ -77,6 +83,8 @@ def ingest(body: Batch):
                 if old != record:
                     raise HTTPException(409, "ID события уже связан с другими данными")
                 continue
+            if not supported_input(conn, event.service, event.version, event.happened_at, floor):
+                raise HTTPException(422, "Событие вне поддерживаемой истории")
             conn.execute(
                 "INSERT INTO events(id,service,version,happened_at,level,message,trace_id) VALUES (%s,%s,%s,%s,%s,%s,%s)",
                 (
@@ -100,7 +108,7 @@ def ingest(body: Batch):
                 body="ready",
                 properties=pika.BasicProperties(delivery_mode=2),
             )
-    except (pika.exceptions.AMQPError, OSError):
+    except (AMQPError, OSError):
         pass
     return {"accepted": accepted, "duplicates": len(body.events) - accepted}
 
@@ -197,6 +205,10 @@ class Traffic(BaseModel):
 def traffic(body: Traffic):
     with connect() as conn:
         conn.execute("SELECT pg_advisory_xact_lock(360028)")
+        if not supported_input(
+            conn, body.service, body.version, body.minute, supported_since(conn)
+        ):
+            raise HTTPException(422, "Счётчик вне поддерживаемой истории")
         previous = conn.execute(
             "SELECT * FROM traffic WHERE service=%s AND version=%s AND minute=%s",
             (body.service, body.version, body.minute),
@@ -208,7 +220,10 @@ def traffic(body: Traffic):
             "INSERT INTO traffic VALUES (%s,%s,%s,%s,%s) ON CONFLICT(service,version,minute) DO UPDATE SET requests=EXCLUDED.requests,revision=EXCLUDED.revision",
             (body.service, body.version, body.minute, body.requests, revision + 1),
         )
-        conn.execute("UPDATE comparisons SET dirty=true WHERE service=%s", (body.service,))
+        conn.execute(
+            "UPDATE comparisons SET dirty=true WHERE service=%s AND archived_at IS NULL",
+            (body.service,),
+        )
         return {"revision": revision + 1}
 
 
@@ -248,7 +263,12 @@ def compare_deployment(body: Comparison):
             if any(old[k] != v for k, v in body.model_dump().items()):
                 raise HTTPException(409, "Идентификатор сравнения уже используется")
             return {"id": body.id}
-        if conn.execute("SELECT count(*) AS n FROM comparisons").fetchone()["n"] >= 100:
+        floor = supported_since(conn)
+        if floor is not None and min(body.before_start, body.after_start) < floor:
+            raise HTTPException(422, "Окно сравнения вне поддерживаемой истории")
+        count_row = conn.execute("SELECT count(*) AS n FROM comparisons").fetchone()
+        assert count_row is not None
+        if count_row["n"] >= 100:
             raise HTTPException(409, "Лимит стенда: 100 сравнений")
         conn.execute(
             "INSERT INTO comparisons(id,service,before_version,after_version,before_start,after_start,minutes) VALUES (%s,%s,%s,%s,%s,%s,%s)",
@@ -280,3 +300,50 @@ def comparison(identity: uuid.UUID):
             (identity,),
         ).fetchall()
         return row
+
+
+class Cleanup(BaseModel):
+    dry_run: bool = True
+    batch_size: int = Field(default=1000, ge=1, le=10000)
+
+
+@app.post("/maintenance/cleanup")
+def cleanup_history(body: Cleanup):
+    with connect() as conn:
+        return cleanup(conn, dry_run=body.dry_run, batch_size=body.batch_size)
+
+
+@app.post("/comparisons/{identity}/archive")
+def archive_comparison(identity: uuid.UUID):
+    with connect() as conn:
+        conn.execute("SELECT pg_advisory_xact_lock(360028)")
+        row = conn.execute("SELECT * FROM comparisons WHERE id=%s", (identity,)).fetchone()
+        if row is None:
+            raise HTTPException(404, "Сравнение не найдено")
+        if row["archived_at"] is None:
+            from traceneedle.regression import evaluate
+
+            # Нельзя заморозить неполностью обработанные данные окна.
+            if conn.execute(
+                """SELECT 1 FROM events WHERE group_id IS NULL AND service=%s AND
+                ((version=%s AND happened_at>=%s AND happened_at<%s+%s*interval '1 minute') OR
+                 (version=%s AND happened_at>=%s AND happened_at<%s+%s*interval '1 minute')) LIMIT 1""",
+                (
+                    row["service"],
+                    row["before_version"],
+                    row["before_start"],
+                    row["before_start"],
+                    row["minutes"],
+                    row["after_version"],
+                    row["after_start"],
+                    row["after_start"],
+                    row["minutes"],
+                ),
+            ).fetchone():
+                raise HTTPException(409, "В окнах есть необработанные события")
+            evaluate(conn, row)
+            conn.execute(
+                "UPDATE comparisons SET archived_at=clock_timestamp(),dirty=false WHERE id=%s",
+                (identity,),
+            )
+        return {"id": identity, "archived": True}
